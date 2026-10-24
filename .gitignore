@@ -8,3 +8,5 @@ coverage/
 !.env.example
 *.tsbuildinfo
 /backups/
+dump.rdb
+*.rdb
