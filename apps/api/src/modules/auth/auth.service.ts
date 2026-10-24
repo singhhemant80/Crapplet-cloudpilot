@@ -1,9 +1,10 @@
 import { hash as argonHash, verify as argonVerify } from '@node-rs/argon2';
-import { and, eq, gt, isNull, sql } from 'drizzle-orm';
+import { and, eq, gt, isNull, ne, sql } from 'drizzle-orm';
+import type Redis from 'ioredis';
 import { jwtVerify, SignJWT } from 'jose';
 import { randomBytes } from 'node:crypto';
 import type { Database } from '../../db/client';
-import { apiCredentials, resellers, sessions, tenants, users } from '../../db/schema';
+import { apiCredentials, customers, resellers, sessions, tenants, users } from '../../db/schema';
 import { randomToken, safeEqualHex, sha256Hex } from '../../common/crypto';
 import { cidrContains } from '../../common/ip';
 import { DomainError, Invalid, NotFound } from '../../common/errors';
@@ -47,7 +48,7 @@ export function actorOf(p: Principal): AuditActor {
 export const ROLE_PERMISSIONS: Record<Role, string[]> = {
   PLATFORM_ADMIN: ['*'],
   TENANT_ADMIN: ['*'],
-  STAFF: ['admin:read', 'orders:manage', 'deposits:review', 'services:manage'],
+  STAFF: ['admin:read', 'orders:manage', 'deposits:review', 'services:manage', 'billing:manage', 'support:manage'],
   RESELLER_ADMIN: [],
   CUSTOMER: [],
 };
@@ -198,6 +199,93 @@ export class AuthService {
       scopes: new Set(row.u.role === 'RESELLER_ADMIN' ? API_SCOPES : []),
       ip,
     };
+  }
+
+  // ───────────────────────── self-service accounts
+
+  /**
+   * Store sign-up: creates a CENTRAL customer with a billing profile and its CUSTOMER login.
+   * The same response is used whether or not the email exists, to avoid account enumeration;
+   * an existing address simply gets a password-reset style hint by email instead.
+   */
+  async registerCustomer(p: {
+    tenantSlug: string;
+    name: string;
+    email: string;
+    password: string;
+    companyName?: string;
+    phone?: string;
+    address1?: string;
+    city?: string;
+    state?: string;
+    stateCode?: string;
+    country: string;
+    postalCode?: string;
+    gstin?: string;
+  }) {
+    const [tenant] = await this.db.select().from(tenants).where(eq(tenants.slug, p.tenantSlug));
+    if (!tenant) throw NotFound('Tenant');
+    const settings = (tenant.settings ?? {}) as { store?: { allowSignup?: boolean } };
+    if (settings.store?.allowSignup === false) throw new DomainError('signup_disabled', 'New sign-ups are closed', 403);
+    const email = p.email.trim().toLowerCase();
+    const hash = await this.hashPassword(p.password);
+    return this.db.transaction(async (tx) => {
+      const [existing] = await tx.select({ id: users.id }).from(users).where(and(eq(users.tenantId, tenant.id), eq(users.email, email)));
+      if (existing) return { created: false as const, tenantId: tenant.id, email, name: p.name };
+      const [c] = await tx
+        .insert(customers)
+        .values({
+          tenantId: tenant.id,
+          name: p.name,
+          email,
+          ownership: 'CENTRAL',
+          companyName: p.companyName || null,
+          phone: p.phone || null,
+          address1: p.address1 || null,
+          city: p.city || null,
+          state: p.state || null,
+          stateCode: p.stateCode || null,
+          country: p.country.toUpperCase(),
+          postalCode: p.postalCode || null,
+          gstin: p.gstin ? p.gstin.toUpperCase() : null,
+        })
+        .returning();
+      await tx.insert(users).values({ tenantId: tenant.id, email, name: p.name, passwordHash: hash, role: 'CUSTOMER', customerId: c.id });
+      await audit(tx, { tenantId: tenant.id, actor: { type: 'system', id: 'signup' }, action: 'customer.signup', targetType: 'customer', targetId: c.id });
+      return { created: true as const, tenantId: tenant.id, email, name: p.name, customerId: c.id };
+    });
+  }
+
+  async changePassword(userId: string, current: string, next: string, keepSessionId?: string) {
+    const [u] = await this.db.select().from(users).where(eq(users.id, userId));
+    if (!u || !(await argonVerify(u.passwordHash, current).catch(() => false))) throw new DomainError('invalid_credentials', 'Current password is wrong', 400);
+    await this.db.update(users).set({ passwordHash: await this.hashPassword(next) }).where(eq(users.id, userId));
+    // Sign out every other session.
+    await this.db
+      .update(sessions)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(sessions.userId, userId), isNull(sessions.revokedAt), keepSessionId ? ne(sessions.id, keepSessionId) : sql`true`));
+    await audit(this.db, { tenantId: u.tenantId, actor: { type: 'user', id: u.id }, action: 'auth.password_changed' });
+  }
+
+  /** Issues a one-hour, single-use reset token (stored hashed in Redis). Returns null for unknown emails. */
+  async createResetToken(redis: Redis, tenantSlug: string, email: string) {
+    const [tenant] = await this.db.select().from(tenants).where(eq(tenants.slug, tenantSlug));
+    if (!tenant) return null;
+    const [u] = await this.db.select().from(users).where(and(eq(users.tenantId, tenant.id), eq(users.email, email.trim().toLowerCase())));
+    if (!u || u.status !== 'ACTIVE') return null;
+    const token = randomToken(32);
+    await redis.set(`pwreset:${sha256Hex(token)}`, u.id, 'EX', 3600);
+    return { token, user: u };
+  }
+
+  async resetPassword(redis: Redis, token: string, password: string) {
+    const userId = await redis.getdel(`pwreset:${sha256Hex(token)}`);
+    if (!userId) throw new DomainError('invalid_token', 'This reset link has expired or was already used', 400);
+    const hash = await this.hashPassword(password);
+    const [u] = await this.db.update(users).set({ passwordHash: hash, failedLogins: 0, lockedUntil: null }).where(eq(users.id, userId)).returning();
+    await this.db.update(sessions).set({ revokedAt: new Date() }).where(and(eq(sessions.userId, userId), isNull(sessions.revokedAt)));
+    await audit(this.db, { tenantId: u.tenantId, actor: { type: 'user', id: u.id }, action: 'auth.password_reset' });
   }
 
   // ───────────────────────── API keys

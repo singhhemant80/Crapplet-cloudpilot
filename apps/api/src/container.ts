@@ -15,6 +15,12 @@ import { RazorpayGateway, SandboxGateway, type PaymentGateway } from './modules/
 import { AuthService } from './modules/auth/auth.service';
 import { ResellerService } from './modules/resellers/reseller.service';
 import type { JobQueue } from './modules/jobs/queue';
+import { SettingsService } from './modules/settings/settings.service';
+import { EmailService, SmtpTransport, type EmailTransport } from './modules/email/email.service';
+import { customerNotifiers } from './modules/email/notifiers';
+import { BillingService } from './modules/billing/billing.service';
+import { SupportService } from './modules/support/support.service';
+import { VpsExtrasService } from './modules/services/vps-extras.service';
 
 /**
  * Composition root. Domain services are plain classes; the HTTP layer (NestJS),
@@ -38,6 +44,11 @@ export interface Container {
   sandboxGateway?: SandboxGateway;
   auth: AuthService;
   resellers: ResellerService;
+  settings: SettingsService;
+  email: EmailService;
+  billing: BillingService;
+  support: SupportService;
+  extras: VpsExtrasService;
   close(): Promise<void>;
 }
 
@@ -46,6 +57,8 @@ export interface ContainerOptions {
   mockStore?: MockStateStore;
   gateways?: PaymentGateway[];
   provisioning?: Partial<{ verifyAttempts: number; verifyIntervalMs: number }>;
+  /** Override the email transport (tests use MemoryTransport). */
+  emailTransport?: EmailTransport | null;
 }
 
 export function createContainer(env: Env, opts: ContainerOptions): Container {
@@ -78,6 +91,9 @@ export function createContainer(env: Env, opts: ContainerOptions): Container {
   }
   for (const g of opts.gateways ?? []) gateways.set(g.name, g);
   const deposits = new DepositService(db, ledger, webhooks, gateways, afterCommit);
+  const settings = new SettingsService(db);
+  const transport = opts.emailTransport !== undefined ? opts.emailTransport : env.SMTP_URL ? new SmtpTransport(env.SMTP_URL) : null;
+  const email = new EmailService(db, settings, transport, env.MAIL_FROM);
 
   const partial = {
     env,
@@ -92,6 +108,8 @@ export function createContainer(env: Env, opts: ContainerOptions): Container {
     resellers,
     deposits,
     sandboxGateway,
+    settings,
+    email,
   } as Omit<Container, 'queue'>;
 
   // Late-bound queue: services call through a proxy so the queue can reference services.
@@ -120,8 +138,18 @@ export function createContainer(env: Env, opts: ContainerOptions): Container {
     afterCommit,
   );
   const serviceOps = new ServiceOpsService(db, hypervisors, ipam, ledger, webhooks, afterCommit);
+  const billing = new BillingService(db, settings, email, gateways, queue, ipam);
+  const support = new SupportService(db, email, settings);
+  deposits.setInvoicePaymentHandler(billing);
+  orders.setInvoicing(billing);
+  const notifiers = customerNotifiers(email, settings);
+  provisioning.setNotifier(notifiers);
+  serviceOps.setNotifier(notifiers);
+  const extras = new VpsExtrasService(db, hypervisors, catalog, ledger, queue, redis, env.APP_ENCRYPTION_KEY);
+  extras.setInvoicer(billing);
+  serviceOps.setExtras(extras);
 
-  Object.assign(partial, { orders, provisioning, serviceOps });
+  Object.assign(partial, { orders, provisioning, serviceOps, billing, support, extras });
   queueRef = opts.queueFactory(partial);
 
   return {
@@ -129,6 +157,9 @@ export function createContainer(env: Env, opts: ContainerOptions): Container {
     orders,
     provisioning,
     serviceOps,
+    billing,
+    support,
+    extras,
     queue,
     async close() {
       await (queueRef as { close?: () => Promise<void> }).close?.();

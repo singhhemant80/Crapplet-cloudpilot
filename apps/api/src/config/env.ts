@@ -22,6 +22,9 @@ const schema = z.object({
     .string()
     .optional()
     .transform((v) => v === 'true'),
+  /** SMTP connection URL, e.g. smtps://user:pass@smtp.zoho.in:465. Without it emails stay queued. */
+  SMTP_URL: z.string().optional(),
+  MAIL_FROM: z.string().default('CloudPilot <no-reply@localhost>'),
   IP_RESERVATION_MINUTES: z.coerce.number().default(30),
   PROVISIONING_MAX_ATTEMPTS: z.coerce.number().default(3),
   LOG_LEVEL: z.string().default('info'),

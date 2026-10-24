@@ -1,6 +1,6 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Database, Tx } from '../../db/client';
-import { customers, orderEvents, orders, osTemplates, products, resellers, services } from '../../db/schema';
+import { customers, invoices, orderEvents, orders, osTemplates, products, resellers, services } from '../../db/schema';
 import { canonicalJson, encryptSecret, sha256Hex } from '../../common/crypto';
 import { Conflict, DomainError, Invalid, NotFound, isUniqueViolation } from '../../common/errors';
 import { audit, type AuditActor } from '../../common/audit';
@@ -74,7 +74,38 @@ export function addCycle(from: Date, cycle: Cycle): Date | null {
   return d;
 }
 
+export interface CreateCustomerOrderInput {
+  tenantId: string;
+  customerId: string;
+  actor: AuditActor;
+  idempotencyKey: string;
+  productSku: string;
+  locationCode: string;
+  templateId: string;
+  cycle: Cycle;
+  hostname: string;
+  ipv4Address?: string;
+  ipReservationToken?: string;
+  password?: string;
+  sshKeys?: string[];
+}
+
+/** Minimal surface of BillingService needed here (set after construction to avoid a cycle). */
+export interface OrderInvoicing {
+  createInvoice(tx: Tx, p: {
+    tenantId: string; customerId: string; kind: 'NEW_ORDER'; orderId: string; dueDate: Date;
+    lines: Array<{ description: string; unitMinor: bigint; hsnSac?: string | null; taxRateBp: number; productId?: string | null }>;
+  }): Promise<{ id: string; number: string | null; totalMinor: bigint; status: string }>;
+}
+
 export class OrderService {
+  private invoicing?: OrderInvoicing;
+  private paymentWindowHours = 48;
+  setInvoicing(i: OrderInvoicing, paymentWindowHours = 48) {
+    this.invoicing = i;
+    this.paymentWindowHours = paymentWindowHours;
+  }
+
   constructor(
     private readonly db: Database,
     private readonly ledger: LedgerService,
@@ -300,6 +331,135 @@ export class OrderService {
     return { created: final, deliveryIds };
   }
 
+  /**
+   * Store checkout for a direct customer: order PENDING_PAYMENT + IP held for the order +
+   * NEW_ORDER invoice, in one transaction. Provisioning starts when the invoice is paid
+   * (BillingService.onPaid). Unpaid orders expire and release the IP (billing automation).
+   */
+  async createCustomerOrder(input: CreateCustomerOrderInput) {
+    if (!this.invoicing) throw new Error('Invoicing not configured');
+    if (!input.idempotencyKey || input.idempotencyKey.length > 200) throw Invalid('idempotencyKey is required');
+    if (!HOSTNAME_RE.test(input.hostname)) throw Invalid('Hostname must be a valid name like server1.example.com');
+    if (!input.password || input.password.length < 12 || input.password.length > 128) throw Invalid('Choose a root password of 12–128 characters');
+    const key = `customer:${input.customerId}:${input.idempotencyKey}`;
+    const requestHash = sha256Hex(canonicalJson({ ...input, password: undefined, actor: undefined, idempotencyKey: undefined }));
+    const [prior] = await this.db.select().from(orders).where(and(eq(orders.tenantId, input.tenantId), isNull(orders.resellerId), eq(orders.idempotencyKey, key)));
+    if (prior) {
+      if (prior.requestHash !== requestHash) throw Conflict('idempotency_key_reused', 'This checkout was already submitted with different details');
+      const [inv] = await this.db.select().from(invoices).where(eq(invoices.orderId, prior.id));
+      return { order: prior, invoiceId: inv?.id ?? null, replayed: true };
+    }
+    try {
+      return await this.db.transaction(async (tx) => {
+        const [cust] = await tx.select().from(customers).where(and(eq(customers.id, input.customerId), eq(customers.tenantId, input.tenantId)));
+        if (!cust) throw NotFound('Customer');
+        const { product, locationId, placement } = await this.resolvePlacement(tx, input.tenantId, input.productSku, input.locationCode, input.templateId);
+        const cur = (await tx.execute(sql`select coalesce(settings->'billing'->>'currency', 'INR') as c from tenants where id = ${input.tenantId}`)).rows[0].c as string;
+        const price = await this.catalog.resolveRetail(tx, input.tenantId, product.id, input.cycle, cur);
+        const [order] = await tx
+          .insert(orders)
+          .values({
+            tenantId: input.tenantId,
+            resellerId: null,
+            customerId: cust.id,
+            source: 'PORTAL',
+            idempotencyKey: key,
+            requestHash,
+            productId: product.id,
+            locationId,
+            templateId: input.templateId,
+            cycle: input.cycle,
+            hostname: input.hostname.toLowerCase(),
+            status: 'PENDING_PAYMENT',
+            currency: price.currency,
+            wholesaleMinor: price.amountMinor,
+            setupFeeMinor: price.setupFeeMinor,
+            encryptedSecret: encryptSecret(input.password!, this.cfg.encryptionKey),
+            sshKeys: input.sshKeys ?? [],
+          })
+          .returning();
+        await tx.insert(orderEvents).values({ orderId: order.id, status: 'PENDING_PAYMENT', message: 'Order placed in the store; waiting for payment' });
+        await this.reserveIps(tx, { tenantId: input.tenantId, orderId: order.id, orderNumber: order.number, product, placement, resellerId: null, ipv4Address: input.ipv4Address, token: input.ipReservationToken });
+        await tx.insert(services).values({
+          tenantId: input.tenantId,
+          customerId: cust.id,
+          orderId: order.id,
+          productId: product.id,
+          providerId: placement.providerId,
+          node: placement.node,
+          status: 'PENDING',
+          hostname: order.hostname,
+          vmName: `cp-${order.number}`,
+          cpuCores: product.cpuCores ?? 1,
+          memoryMb: product.memoryMb ?? 1024,
+          diskGb: product.diskGb ?? 10,
+          cycle: input.cycle,
+          renewalMinor: price.amountMinor,
+          currency: price.currency,
+        });
+        const lines = [
+          { description: `${product.name} — ${order.hostname} (${input.cycle.toLowerCase().replace('_', '-')})`, unitMinor: price.amountMinor, hsnSac: product.hsnSac, taxRateBp: product.gstRateBp, productId: product.id },
+        ];
+        if (price.setupFeeMinor > 0n) lines.push({ description: `Setup fee — ${product.name}`, unitMinor: price.setupFeeMinor, hsnSac: product.hsnSac, taxRateBp: product.gstRateBp, productId: product.id });
+        const invoice = await this.invoicing!.createInvoice(tx, {
+          tenantId: input.tenantId,
+          customerId: cust.id,
+          kind: 'NEW_ORDER',
+          orderId: order.id,
+          dueDate: new Date(Date.now() + this.paymentWindowHours * 3_600_000),
+          lines,
+        });
+        await audit(tx, { tenantId: input.tenantId, actor: input.actor, action: 'order.create', targetType: 'order', targetId: order.id, metadata: { sku: input.productSku, invoice: invoice.number } });
+        const [final] = await tx.select().from(orders).where(eq(orders.id, order.id));
+        return { order: final, invoiceId: invoice.id, replayed: false };
+      });
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        const [winner] = await this.db.select().from(orders).where(and(eq(orders.tenantId, input.tenantId), isNull(orders.resellerId), eq(orders.idempotencyKey, key)));
+        if (winner) {
+          const [inv] = await this.db.select().from(invoices).where(eq(invoices.orderId, winner.id));
+          return { order: winner, invoiceId: inv?.id ?? null, replayed: true };
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async resolvePlacement(tx: Tx, tenantId: string, sku: string, locationCode: string, templateId: string) {
+    const product = await this.catalog.getProductBySku(tenantId, sku);
+    const loc = await tx.execute(sql`select id from locations where tenant_id = ${tenantId} and code = ${locationCode}`);
+    const locationId = loc.rows[0]?.id as string | undefined;
+    if (!locationId) throw NotFound(`Location ${locationCode}`);
+    const placement = await this.catalog.placementFor(tx, product.id, locationId);
+    if (!placement) throw new DomainError('location_not_available', 'Product is not offered in this location', 422);
+    if (!placement.templateIds.includes(templateId)) throw Invalid('Template is not offered for this product/location');
+    const [template] = await tx.select().from(osTemplates).where(eq(osTemplates.id, templateId));
+    if (!template?.enabled) throw Invalid('Template is disabled');
+    return { product, locationId, placement, template };
+  }
+
+  private async reserveIps(
+    tx: Tx,
+    p: {
+      tenantId: string; orderId: string; orderNumber: number; resellerId: string | null; ipv4Address?: string; token?: string;
+      product: { ipv4Count: number; ipv6Count: number };
+      placement: { ipv4PoolId: string | null; ipv6PoolId: string | null };
+    },
+  ) {
+    if (p.product.ipv4Count > 0) {
+      if (!p.placement.ipv4PoolId) throw new DomainError('placement_misconfigured', 'No IPv4 pool configured for this location', 500);
+      if (p.token) {
+        await this.ipam.bindReservation(tx, { tenantId: p.tenantId, token: p.token, orderId: p.orderId, resellerId: p.resellerId, poolId: p.placement.ipv4PoolId });
+      } else {
+        await this.ipam.reserve(tx, { tenantId: p.tenantId, poolId: p.placement.ipv4PoolId, address: p.ipv4Address, resellerId: p.resellerId, orderId: p.orderId, ttlMinutes: this.cfg.ipReservationMinutes, reason: `reserved for order ${p.orderNumber}` });
+      }
+    }
+    if (p.product.ipv6Count > 0) {
+      if (!p.placement.ipv6PoolId) throw new DomainError('placement_misconfigured', 'No IPv6 pool configured for this location', 500);
+      await this.ipam.reserve(tx, { tenantId: p.tenantId, poolId: p.placement.ipv6PoolId, resellerId: p.resellerId, orderId: p.orderId, ttlMinutes: this.cfg.ipReservationMinutes, reason: `reserved for order ${p.orderNumber}` });
+    }
+  }
+
   /** Admin approval for MANUAL_APPROVAL products. */
   async approve(tenantId: string, orderId: string, actor: AuditActor) {
     await this.db.transaction(async (tx) => {
@@ -341,9 +501,10 @@ export class OrderService {
     return this.get(tenantId, o.id, resellerId);
   }
 
-  async list(tenantId: string, opts: { resellerId?: string; status?: string[]; limit?: number } = {}) {
+  async list(tenantId: string, opts: { resellerId?: string; customerId?: string; status?: string[]; limit?: number } = {}) {
     const where = [eq(orders.tenantId, tenantId)];
     if (opts.resellerId) where.push(eq(orders.resellerId, opts.resellerId));
+    if (opts.customerId) where.push(eq(orders.customerId, opts.customerId));
     if (opts.status?.length) where.push(inArray(orders.status, opts.status as OrderStatus[]));
     return this.db
       .select({

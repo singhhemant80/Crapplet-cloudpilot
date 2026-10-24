@@ -3,10 +3,19 @@
  * inline implementation. Job ids are deterministic so that enqueueing the
  * same work twice (duplicate callbacks, retries) collapses into one job.
  */
+export type ServiceAction =
+  | 'start' | 'stop' | 'shutdown' | 'reboot' | 'suspend' | 'unsuspend' | 'terminate'
+  | 'reinstall' | 'upgrade' | 'snapshot_create' | 'snapshot_rollback' | 'snapshot_delete';
+
 export interface ServiceOperation {
   serviceId: string;
-  action: 'start' | 'stop' | 'shutdown' | 'reboot' | 'suspend' | 'unsuspend' | 'terminate';
+  action: ServiceAction;
   reason?: string;
+  /**
+   * Action parameters. Secrets (reinstall password) are AES-GCM encrypted here because
+   * job payloads are stored in Redis.
+   */
+  params?: Record<string, string | number>;
   actor: { type: 'user' | 'api_key' | 'system'; id?: string | null };
 }
 

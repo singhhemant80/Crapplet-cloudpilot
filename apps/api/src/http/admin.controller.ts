@@ -168,6 +168,8 @@ export class AdminController {
         bandwidthGb: z.number().int().min(0).optional(),
         ipv4Count: z.number().int().min(0).max(1).optional(),
         ipv6Count: z.number().int().min(0).max(1).optional(),
+        hsnSac: z.string().regex(/^\d{4,8}$/).optional(),
+        gstRateBp: z.number().int().min(0).max(2800).optional(),
       }),
       body,
     );
@@ -178,7 +180,14 @@ export class AdminController {
   @Admin('catalog:write')
   updateProduct(@Me() me: Principal, @Param('id') id: string, @Body() body: unknown) {
     const b = parse(
-      z.object({ name: z.string().min(2).optional(), description: z.string().optional(), status: z.enum(['DRAFT', 'ACTIVE', 'RETIRED']).optional() }),
+      z.object({
+        name: z.string().min(2).optional(),
+        description: z.string().optional(),
+        status: z.enum(['DRAFT', 'ACTIVE', 'RETIRED']).optional(),
+        provisioning: z.enum(['AUTOMATIC', 'MANUAL_APPROVAL']).optional(),
+        hsnSac: z.string().regex(/^\d{4,8}$/).optional(),
+        gstRateBp: z.number().int().min(0).max(2800).optional(),
+      }),
       body,
     );
     return this.c.catalog.updateProduct(me.tenantId, parse(uuid, id), b);
@@ -214,8 +223,8 @@ export class AdminController {
   @Post('price-lists')
   @Admin('catalog:write')
   createPriceList(@Me() me: Principal, @Body() body: unknown) {
-    const b = parse(z.object({ name: z.string().min(2), currency, isDefaultWholesale: z.boolean().optional() }), body);
-    return this.c.catalog.createPriceList(me.tenantId, b.name, b.currency, b.isDefaultWholesale);
+    const b = parse(z.object({ name: z.string().min(2), currency, isDefaultWholesale: z.boolean().optional(), isDefaultRetail: z.boolean().optional() }), body);
+    return this.c.catalog.createPriceList(me.tenantId, b.name, b.currency, b.isDefaultWholesale, b.isDefaultRetail);
   }
 
   @Put('price-lists/:id/prices')

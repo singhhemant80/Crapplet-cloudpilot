@@ -55,7 +55,8 @@ async function main() {
         throw err;
       }
     },
-    { connection, concurrency: 8, lockDuration: 5 * 60_000 },
+    // Reinstalls and resizes wait for the hypervisor; keep the lock long enough.
+    { connection, concurrency: 8, lockDuration: 15 * 60_000 },
   );
 
   const webhooks = new Worker(
@@ -68,6 +69,8 @@ async function main() {
   const maintenanceQueue = new Queue(QUEUE_NAMES.maintenance, { connection });
   await maintenanceQueue.upsertJobScheduler('sweep', { every: 60_000 }, { name: 'sweep' });
   await maintenanceQueue.upsertJobScheduler('reconcile', { every: 3_600_000 }, { name: 'reconcile' });
+  await maintenanceQueue.upsertJobScheduler('mail', { every: 20_000 }, { name: 'mail' });
+  await maintenanceQueue.upsertJobScheduler('billing', { every: 15 * 60_000 }, { name: 'billing' });
   const maintenance = new Worker(
     QUEUE_NAMES.maintenance,
     async (job) => {
@@ -85,6 +88,22 @@ async function main() {
         const stuck = await c.db.execute(sql`select id from orders
           where status in ('QUEUED','PROVISIONING','CONFIGURING_NETWORK','VERIFYING') and updated_at < now() - interval '20 minutes' limit 50`);
         for (const r of stuck.rows) await producer!.enqueueProvision(r.id as string);
+      }
+      if (job.name === 'mail') {
+        const r = await c.email.deliverPending(100);
+        if (r.sent || r.failed) log.info(r, 'email outbox delivered');
+      }
+      if (job.name === 'billing') {
+        // Renewal invoices, overdue reminders, suspension after grace, unpaid order expiry.
+        const tenants = await c.db.execute(sql`select id from tenants`);
+        for (const t of tenants.rows) {
+          try {
+            const r = await c.billing.runAutomation(t.id as string);
+            log.info({ tenantId: t.id, ...r }, 'billing automation ran');
+          } catch (err) {
+            log.error({ tenantId: t.id, err }, 'billing automation failed');
+          }
+        }
       }
       if (job.name === 'reconcile') {
         const tenants = await c.db.execute(sql`select id from tenants`);

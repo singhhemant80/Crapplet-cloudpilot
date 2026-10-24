@@ -1,11 +1,11 @@
 import { and, desc, eq } from 'drizzle-orm';
-import type { Database } from '../../db/client';
+import type { Database, Tx } from '../../db/client';
 import { deposits, paymentEvents, resellers } from '../../db/schema';
 import { Conflict, DomainError, Invalid, NotFound, isUniqueViolation } from '../../common/errors';
 import { audit, type AuditActor } from '../../common/audit';
 import type { LedgerService } from '../ledger/ledger.service';
 import type { WebhookService } from '../webhooks/webhook.service';
-import type { PaymentGateway } from './gateways';
+import type { PaymentGateway, VerifiedPaymentEvent } from './gateways';
 
 const MIN_DEPOSIT_MINOR = 100n; // 1.00 in major units
 const MAX_DEPOSIT_MINOR = 10_000_000_00n; // 1 crore
@@ -16,7 +16,18 @@ const MAX_DEPOSIT_MINOR = 10_000_000_00n; // 1 crore
  *   - an administrator approving a bank-transfer deposit after checking the bank statement.
  * Reseller-submitted references or screenshots never credit funds by themselves.
  */
+/** Hook for gateway events that belong to customer invoices rather than wallet deposits. */
+export interface InvoicePaymentHandler {
+  applyGatewayEvent(tx: Tx, gateway: string, ev: VerifiedPaymentEvent): Promise<string | null>;
+  takeAfterCommit(tx: Tx): Array<() => Promise<void>>;
+}
+
 export class DepositService {
+  private invoicePayments?: InvoicePaymentHandler;
+  setInvoicePaymentHandler(h: InvoicePaymentHandler) {
+    this.invoicePayments = h;
+  }
+
   constructor(
     private readonly db: Database,
     private readonly ledger: LedgerService,
@@ -206,6 +217,7 @@ export class DepositService {
       } else throw err;
     }
 
+    let later: Array<() => Promise<void>> = [];
     const outcome = await this.db.transaction(async (tx) => {
       const [d] = await tx
         .select()
@@ -214,7 +226,10 @@ export class DepositService {
         .for('update');
       let result: string;
       let deliveryIds: string[] = [];
-      if (!d) result = 'unknown_order';
+      if (!d) {
+        result = (await this.invoicePayments?.applyGatewayEvent(tx, gw.name, ev)) ?? 'unknown_order';
+        later = this.invoicePayments?.takeAfterCommit(tx) ?? [];
+      }
       else if (ev.outcome === 'ignored') result = 'ignored';
       else if (d.status === 'CREDITED') result = 'already_credited';
       else if (ev.outcome === 'failed') {
@@ -252,6 +267,7 @@ export class DepositService {
       return { result, deliveryIds };
     });
     await this.afterCommit(outcome.deliveryIds);
+    for (const fn of later) await fn().catch((e) => console.error('after-commit action failed', e));
     return { status: outcome.result };
   }
 

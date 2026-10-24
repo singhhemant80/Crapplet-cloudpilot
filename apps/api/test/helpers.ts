@@ -43,7 +43,7 @@ export interface World {
   priceListId: string;
 }
 
-export async function buildWorld(opts: { failures?: Record<string, unknown> } = {}): Promise<World> {
+export async function buildWorld(opts: { failures?: Record<string, unknown>; emailTransport?: import('../src/modules/email/email.service').EmailTransport | null } = {}): Promise<World> {
   const env = testEnv();
   const mockStore = new MemoryStateStore();
   let q!: InlineQueue;
@@ -51,6 +51,7 @@ export async function buildWorld(opts: { failures?: Record<string, unknown> } = 
     mockStore,
     queueFactory: (p) => (q = new InlineQueue(p, 'manual')),
     provisioning: { verifyAttempts: 2, verifyIntervalMs: 1 },
+    emailTransport: opts.emailTransport ?? null,
   });
   const [tenant] = await c.db.insert(tenants).values({ slug: `t-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, name: 'Crapplet Cloud' }).returning();
   const [loc] = await c.db.insert(locations).values({ tenantId: tenant.id, code: 'IN-MUM-1', name: 'Mumbai 1', country: 'IN' }).returning();

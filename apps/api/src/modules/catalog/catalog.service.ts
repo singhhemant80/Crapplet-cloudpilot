@@ -133,17 +133,74 @@ export class CatalogService {
 
   // ───────────────────────── pricing
 
-  async createPriceList(tenantId: string, name: string, currency: string, isDefaultWholesale = false) {
+  async createPriceList(tenantId: string, name: string, currency: string, isDefaultWholesale = false, isDefaultRetail = false) {
+    if (isDefaultWholesale && isDefaultRetail) throw Invalid('A price list is either the default wholesale list or the default retail list, not both');
     return this.db.transaction(async (tx) => {
       if (isDefaultWholesale) {
-        await tx
-          .update(priceLists)
-          .set({ isDefaultWholesale: false })
-          .where(and(eq(priceLists.tenantId, tenantId), eq(priceLists.currency, currency)));
+        await tx.update(priceLists).set({ isDefaultWholesale: false }).where(and(eq(priceLists.tenantId, tenantId), eq(priceLists.currency, currency)));
       }
-      const [row] = await tx.insert(priceLists).values({ tenantId, name, currency, isDefaultWholesale }).returning();
+      if (isDefaultRetail) {
+        await tx.update(priceLists).set({ isDefaultRetail: false }).where(and(eq(priceLists.tenantId, tenantId), eq(priceLists.currency, currency)));
+      }
+      const [row] = await tx.insert(priceLists).values({ tenantId, name, currency, isDefaultWholesale, isDefaultRetail }).returning();
       return row;
     });
+  }
+
+  /** Customer-facing price from the tenant's default retail list. */
+  async resolveRetail(tx: DbOrTx, tenantId: string, productId: string, cycle: Cycle, currency: string): Promise<ResolvedPrice> {
+    const [product] = await tx.select().from(products).where(and(eq(products.id, productId), eq(products.tenantId, tenantId)));
+    if (!product || product.status !== 'ACTIVE') throw new DomainError('product_not_available', 'Product is not available', 422);
+    const [row] = await tx
+      .select({ price: prices, list: priceLists })
+      .from(prices)
+      .innerJoin(priceLists, eq(priceLists.id, prices.priceListId))
+      .where(and(eq(priceLists.tenantId, tenantId), eq(priceLists.isDefaultRetail, true), eq(priceLists.currency, currency), eq(prices.productId, productId), eq(prices.cycle, cycle)));
+    if (!row) throw new DomainError('product_not_available', `This plan is not sold on a ${cycle.toLowerCase()} cycle`, 422);
+    return { amountMinor: row.price.amountMinor, setupFeeMinor: row.price.setupFeeMinor, currency, priceListId: row.list.id, source: 'default' };
+  }
+
+  /** Store catalog: active products with a retail price and at least one enabled placement. */
+  async storeCatalog(tenantId: string, currency: string) {
+    const all = await this.db.query.products.findMany({
+      where: and(eq(products.tenantId, tenantId), eq(products.status, 'ACTIVE')),
+      with: { placements: true, prices: true },
+      orderBy: (p, { asc }) => [asc(p.memoryMb)],
+    });
+    const [retail] = await this.db.select().from(priceLists).where(and(eq(priceLists.tenantId, tenantId), eq(priceLists.isDefaultRetail, true), eq(priceLists.currency, currency)));
+    if (!retail) return [];
+    const out = [];
+    for (const p of all) {
+      const pricing = p.prices
+        .filter((x) => x.priceListId === retail.id)
+        .map((x) => ({ cycle: x.cycle, amountMinor: x.amountMinor, setupFeeMinor: x.setupFeeMinor, currency }));
+      const enabled = p.placements.filter((pl) => pl.enabled);
+      if (!pricing.length || !enabled.length) continue;
+      const locs = await this.db.select().from(locations).where(inArray(locations.id, enabled.map((pl) => pl.locationId)));
+      const tplIds = [...new Set(enabled.flatMap((pl) => pl.templateIds))];
+      const tpls = tplIds.length ? await this.db.select().from(osTemplates).where(inArray(osTemplates.id, tplIds)) : [];
+      out.push({
+        id: p.id,
+        sku: p.sku,
+        name: p.name,
+        type: p.type,
+        description: p.description,
+        gstRateBp: p.gstRateBp,
+        specs: { cpuCores: p.cpuCores, memoryMb: p.memoryMb, diskGb: p.diskGb, bandwidthGb: p.bandwidthGb, ipv4: p.ipv4Count, ipv6: p.ipv6Count },
+        pricing,
+        locations: locs.map((l) => {
+          const pl = enabled.find((x) => x.locationId === l.id)!;
+          return {
+            id: l.id,
+            code: l.code,
+            name: l.name,
+            ipv4PoolId: pl.ipv4PoolId,
+            templates: tpls.filter((t) => pl.templateIds.includes(t.id)).map((t) => ({ id: t.id, name: t.name, osFamily: t.osFamily })),
+          };
+        }),
+      });
+    }
+    return out;
   }
 
   listPriceLists(tenantId: string) {

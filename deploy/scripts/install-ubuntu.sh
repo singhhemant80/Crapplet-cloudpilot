@@ -81,6 +81,10 @@ WEBHOOK_ALLOW_PRIVATE_TARGETS=false
 RAZORPAY_KEY_ID=
 RAZORPAY_KEY_SECRET=
 RAZORPAY_WEBHOOK_SECRET=
+# Outgoing email (invoices, ticket replies, password resets). Example:
+#   SMTP_URL=smtps://user%40example.com:app-password@smtp.example.com:465
+SMTP_URL=
+MAIL_FROM=CloudPilot <no-reply@localhost>
 LOG_LEVEL=info
 SEED_ADMIN_EMAIL=${ADMIN}
 SEED_ADMIN_PASSWORD=${ADMIN_PW}
@@ -94,6 +98,9 @@ set_env() { if grep -q "^$1=" "$ENV"; then sed -i "s|^$1=.*|$1=$2|" "$ENV"; else
 set_env PUBLIC_API_URL "${SCHEME}://${API}"
 set_env WEB_ORIGIN "${SCHEME}://${PANEL}"
 set_env COOKIE_SECURE "$([ "$TLS" = 1 ] && echo true || echo false)"
+# Settings added in later releases (kept if already present).
+grep -q '^SMTP_URL=' "$ENV" || printf '# Outgoing email, e.g. smtps://user%%40example.com:app-password@smtp.example.com:465\nSMTP_URL=\n' >> "$ENV"
+grep -q '^MAIL_FROM=' "$ENV" || echo 'MAIL_FROM=CloudPilot <no-reply@localhost>' >> "$ENV"
 
 log "Building application"
 MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)

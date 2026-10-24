@@ -36,6 +36,20 @@
       "when": 1792812779340,
       "tag": "0004_ipam_history_ownership",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1792818811627,
+      "tag": "0005_billing_store_support",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792819173920,
+      "tag": "0006_customer_order_keys",
+      "breakpoints": true
     }
   ]
 }

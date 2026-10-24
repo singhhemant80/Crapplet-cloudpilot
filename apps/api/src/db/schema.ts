@@ -67,6 +67,13 @@ export const serviceStatus = pgEnum('service_status', [
 ]);
 export const integrationPlatform = pgEnum('integration_platform', ['WHMCS', 'BLESTA', 'HOSTBILL', 'WISECP', 'CLIENTEXEC', 'CUSTOM']);
 export const deliveryStatus = pgEnum('delivery_status', ['PENDING', 'SUCCEEDED', 'FAILED', 'DEAD']);
+export const invoiceStatus = pgEnum('invoice_status', ['DRAFT', 'UNPAID', 'PARTIALLY_PAID', 'PAID', 'OVERDUE', 'VOID', 'REFUNDED']);
+export const invoiceKind = pgEnum('invoice_kind', ['NEW_ORDER', 'RENEWAL', 'UPGRADE', 'MANUAL']);
+export const taxType = pgEnum('tax_type', ['INTRA', 'INTER', 'EXPORT', 'NONE']);
+export const paymentStatus = pgEnum('payment_status', ['PENDING', 'SUCCEEDED', 'FAILED', 'REFUNDED']);
+export const ticketStatus = pgEnum('ticket_status', ['OPEN', 'ANSWERED', 'CUSTOMER_REPLY', 'ON_HOLD', 'CLOSED']);
+export const ticketPriority = pgEnum('ticket_priority', ['LOW', 'MEDIUM', 'HIGH', 'URGENT']);
+export const emailStatus = pgEnum('email_status', ['QUEUED', 'SENT', 'FAILED']);
 
 // ─────────────────────────────────────────────── tenancy & identity
 
@@ -154,6 +161,18 @@ export const customers = pgTable(
     name: text().notNull(),
     email: text(),
     ownership: customerOwnership().notNull().default('CENTRAL'),
+    // Billing profile (GST invoices)
+    companyName: text(),
+    phone: text(),
+    address1: text(),
+    address2: text(),
+    city: text(),
+    state: text(),
+    /** Two-digit GST state code (e.g. 27 Maharashtra); decides CGST+SGST vs IGST. */
+    stateCode: char({ length: 2 }),
+    country: char({ length: 2 }).notNull().default('IN'),
+    postalCode: text(),
+    gstin: text(),
     createdAt: created(),
   },
   (t) => [uniqueIndex().on(t.resellerId, t.externalRef), index().on(t.tenantId)],
@@ -277,6 +296,10 @@ export const products = pgTable(
     bandwidthGb: integer(),
     ipv4Count: integer().notNull().default(1),
     ipv6Count: integer().notNull().default(0),
+    /** SAC 998315 = hosting and IT infrastructure provisioning services. */
+    hsnSac: text().notNull().default('998315'),
+    /** GST rate in basis points (1800 = 18%). Per product, never hard-coded. */
+    gstRateBp: integer().notNull().default(1800),
     createdAt: created(),
   },
   (t) => [uniqueIndex().on(t.tenantId, t.sku)],
@@ -311,6 +334,8 @@ export const priceLists = pgTable(
     currency: currency().notNull(),
     /** Applied to resellers that have no reseller-specific list. */
     isDefaultWholesale: boolean().notNull().default(false),
+    /** Prices shown to direct customers in the store. */
+    isDefaultRetail: boolean().notNull().default(false),
     createdAt: created(),
   },
   (t) => [uniqueIndex().on(t.tenantId, t.name)],
@@ -685,6 +710,194 @@ export const webhookDeliveries = pgTable(
   (t) => [uniqueIndex().on(t.eventId, t.endpointId)],
 );
 
+// ─────────────────────────────────────────────── billing (direct customers)
+
+export const invoices = pgTable(
+  'invoices',
+  {
+    id: id(),
+    tenantId: uuid().notNull(),
+    customerId: uuid().notNull().references(() => customers.id),
+    /** Assigned only when issued, sequential per financial year (GST rule 46). */
+    number: text(),
+    financialYear: text(),
+    status: invoiceStatus().notNull().default('DRAFT'),
+    kind: invoiceKind().notNull(),
+    currency: currency().notNull(),
+    issueDate: ts(),
+    dueDate: ts(),
+    subtotalMinor: money().notNull().default(sql`0`),
+    cgstMinor: money().notNull().default(sql`0`),
+    sgstMinor: money().notNull().default(sql`0`),
+    igstMinor: money().notNull().default(sql`0`),
+    taxMinor: money().notNull().default(sql`0`),
+    totalMinor: money().notNull().default(sql`0`),
+    paidMinor: money().notNull().default(sql`0`),
+    taxType: taxType().notNull().default('NONE'),
+    placeOfSupply: text(),
+    sellerGstin: text(),
+    buyerGstin: text(),
+    buyerName: text().notNull(),
+    buyerAddress: text().notNull().default(''),
+    orderId: uuid(),
+    serviceId: uuid(),
+    periodStart: ts(),
+    periodEnd: ts(),
+    notes: text().notNull().default(''),
+    paidAt: ts(),
+    voidedAt: ts(),
+    reminderSentAt: ts(),
+    createdAt: created(),
+  },
+  (t) => [
+    uniqueIndex().on(t.tenantId, t.number),
+    index().on(t.customerId, t.createdAt),
+    index().on(t.status, t.dueDate),
+    // One renewal invoice per service period.
+    uniqueIndex('invoices_renewal_period_uq').on(t.serviceId, t.periodStart).where(sql`kind = 'RENEWAL' and status <> 'VOID'`),
+  ],
+);
+
+export const invoiceLines = pgTable('invoice_lines', {
+  id: id(),
+  invoiceId: uuid().notNull().references(() => invoices.id, { onDelete: 'cascade' }),
+  description: text().notNull(),
+  hsnSac: text(),
+  quantity: integer().notNull().default(1),
+  unitMinor: money().notNull(),
+  amountMinor: money().notNull(),
+  taxRateBp: integer().notNull().default(0),
+  productId: uuid(),
+  serviceId: uuid(),
+  sortOrder: integer().notNull().default(0),
+});
+
+export const invoiceSequences = pgTable(
+  'invoice_sequences',
+  {
+    tenantId: uuid().notNull(),
+    financialYear: text().notNull(),
+    next: integer().notNull().default(1),
+  },
+  (t) => [uniqueIndex().on(t.tenantId, t.financialYear)],
+);
+
+export const payments = pgTable(
+  'payments',
+  {
+    id: id(),
+    tenantId: uuid().notNull(),
+    invoiceId: uuid().notNull().references(() => invoices.id),
+    customerId: uuid().notNull(),
+    gateway: text().notNull(), // sandbox | razorpay | manual
+    amountMinor: money().notNull(),
+    currency: currency().notNull(),
+    status: paymentStatus().notNull().default('PENDING'),
+    gatewayOrderId: text(),
+    gatewayPaymentId: text(),
+    reference: text(),
+    recordedById: uuid(),
+    paidAt: ts(),
+    createdAt: created(),
+  },
+  (t) => [uniqueIndex().on(t.gateway, t.gatewayOrderId), uniqueIndex().on(t.gateway, t.gatewayPaymentId), index().on(t.invoiceId)],
+);
+
+// ─────────────────────────────────────────────── support
+
+export const ticketDepartments = pgTable('ticket_departments', {
+  id: id(),
+  tenantId: uuid().notNull(),
+  name: text().notNull(),
+  description: text().notNull().default(''),
+  sortOrder: integer().notNull().default(0),
+  active: boolean().notNull().default(true),
+});
+
+export const tickets = pgTable(
+  'tickets',
+  {
+    id: id(),
+    tenantId: uuid().notNull(),
+    number: serial().notNull(),
+    departmentId: uuid().notNull().references(() => ticketDepartments.id),
+    customerId: uuid().references(() => customers.id),
+    resellerId: uuid().references(() => resellers.id),
+    openedByUserId: uuid(),
+    serviceId: uuid(),
+    subject: text().notNull(),
+    status: ticketStatus().notNull().default('OPEN'),
+    priority: ticketPriority().notNull().default('MEDIUM'),
+    lastReplyAt: created(),
+    closedAt: ts(),
+    createdAt: created(),
+  },
+  (t) => [index().on(t.tenantId, t.status, t.lastReplyAt), index().on(t.customerId), index().on(t.resellerId)],
+);
+
+export const ticketMessages = pgTable(
+  'ticket_messages',
+  {
+    id: id(),
+    ticketId: uuid().notNull().references(() => tickets.id, { onDelete: 'cascade' }),
+    authorType: text().notNull(), // STAFF | CUSTOMER | RESELLER | SYSTEM
+    authorUserId: uuid(),
+    authorName: text().notNull(),
+    body: text().notNull(),
+    /** Staff-only notes, never shown to customers or resellers. */
+    internal: boolean().notNull().default(false),
+    createdAt: created(),
+  },
+  (t) => [index().on(t.ticketId, t.createdAt)],
+);
+
+export const announcements = pgTable('announcements', {
+  id: id(),
+  tenantId: uuid().notNull(),
+  title: text().notNull(),
+  body: text().notNull(),
+  audience: text().notNull().default('ALL'), // ALL | CUSTOMERS | RESELLERS
+  published: boolean().notNull().default(true),
+  createdAt: created(),
+});
+
+// ─────────────────────────────────────────────── email
+
+/** Admin overrides of the built-in templates (keys in modules/email/templates.ts). */
+export const emailTemplates = pgTable(
+  'email_templates',
+  {
+    id: id(),
+    tenantId: uuid().notNull(),
+    key: text().notNull(),
+    subject: text().notNull(),
+    body: text().notNull(),
+    updatedAt: created(),
+  },
+  (t) => [uniqueIndex().on(t.tenantId, t.key)],
+);
+
+/** Outbox: every notification is stored, then sent by the worker (and retried). */
+export const emailMessages = pgTable(
+  'email_messages',
+  {
+    id: id(),
+    tenantId: uuid().notNull(),
+    toAddress: text().notNull(),
+    subject: text().notNull(),
+    body: text().notNull(),
+    templateKey: text(),
+    status: emailStatus().notNull().default('QUEUED'),
+    attempts: integer().notNull().default(0),
+    lastError: text(),
+    relatedType: text(),
+    relatedId: text(),
+    sentAt: ts(),
+    createdAt: created(),
+  },
+  (t) => [index().on(t.status, t.createdAt), index().on(t.tenantId, t.createdAt)],
+);
+
 // ─────────────────────────────────────────────── relations (query API)
 
 export const ordersRelations = relations(orders, ({ one, many }) => ({
@@ -716,4 +929,21 @@ export const ledgerTransactionsRelations = relations(ledgerTransactions, ({ many
 export const ledgerEntriesRelations = relations(ledgerEntries, ({ one }) => ({
   transaction: one(ledgerTransactions, { fields: [ledgerEntries.transactionId], references: [ledgerTransactions.id] }),
   account: one(ledgerAccounts, { fields: [ledgerEntries.accountId], references: [ledgerAccounts.id] }),
+}));
+
+export const invoicesRelations = relations(invoices, ({ many }) => ({
+  lines: many(invoiceLines),
+  payments: many(payments),
+}));
+export const invoiceLinesRelations = relations(invoiceLines, ({ one }) => ({
+  invoice: one(invoices, { fields: [invoiceLines.invoiceId], references: [invoices.id] }),
+}));
+export const paymentsRelations = relations(payments, ({ one }) => ({
+  invoice: one(invoices, { fields: [payments.invoiceId], references: [invoices.id] }),
+}));
+export const ticketsRelations = relations(tickets, ({ many }) => ({
+  messages: many(ticketMessages),
+}));
+export const ticketMessagesRelations = relations(ticketMessages, ({ one }) => ({
+  ticket: one(tickets, { fields: [ticketMessages.ticketId], references: [tickets.id] }),
 }));

@@ -1,8 +1,10 @@
-import { ProviderError } from '../errors';
+import { ProviderError, UnsupportedOperationError } from '../errors';
 import type {
   Capability,
   ConnectionCheck,
   ConsoleSession,
+  ConsoleUpstream,
+  SnapshotInfo,
   CreateInstanceSpec,
   HypervisorAdapter,
   InstanceRef,
@@ -75,7 +77,6 @@ const ALL_CAPS: Capability[] = [
   'network.ipconfig',
   'network.vlan',
   'snapshot',
-  'console.vnc',
   'metrics',
   'tasks',
 ];
@@ -248,6 +249,27 @@ export class MockHypervisorAdapter implements HypervisorAdapter {
     const [vms, vm] = await this.mustGet(ref);
     vm.snapshots.push(name);
     await this.saveVms(vms);
+  }
+
+  async listSnapshots(ref: InstanceRef): Promise<SnapshotInfo[]> {
+    const [, vm] = await this.mustGet(ref);
+    return vm.snapshots.map((name) => ({ name }));
+  }
+
+  async rollbackSnapshot(ref: InstanceRef, name: string) {
+    const [, vm] = await this.mustGet(ref);
+    if (!vm.snapshots.includes(name)) throw new ProviderError(`Snapshot ${name} not found`, false, 404);
+  }
+
+  async deleteSnapshot(ref: InstanceRef, name: string) {
+    const [vms, vm] = await this.mustGet(ref);
+    vm.snapshots = vm.snapshots.filter((s) => s !== name);
+    await this.saveVms(vms);
+  }
+
+  /** The mock has no VNC server; 'console.vnc' is not advertised. */
+  consoleUpstream(): ConsoleUpstream {
+    throw new UnsupportedOperationError(this.providerType, 'console');
   }
 
   async openConsole(ref: InstanceRef): Promise<ConsoleSession> {

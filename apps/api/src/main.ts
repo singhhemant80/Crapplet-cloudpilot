@@ -8,6 +8,7 @@ import { createContainer, type Container } from './container';
 import { AppModule } from './app.module';
 import { BullMqQueue } from './modules/jobs/bullmq-queue';
 import { log } from './http/common';
+import { attachConsoleProxy } from './http/console-proxy';
 
 // Money is BigInt minor units internally; it is serialized as a decimal string.
 (BigInt.prototype as unknown as { toJSON: () => string }).toJSON = function (this: bigint) {
@@ -33,6 +34,7 @@ export async function createApp(container: Container, env: Env) {
     .addBearerAuth()
     .build();
   SwaggerModule.setup('docs', app, () => SwaggerModule.createDocument(app, doc));
+  attachConsoleProxy(app.getHttpServer(), (t) => container.extras.redeemConsoleToken(t), (m, e) => log.warn({ err: e }, m));
   return app;
 }
 

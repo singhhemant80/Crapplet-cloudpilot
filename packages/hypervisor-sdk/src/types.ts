@@ -162,6 +162,20 @@ export interface ConsoleSession {
   expiresAt: Date;
 }
 
+export interface SnapshotInfo {
+  name: string;
+  description?: string;
+  createdAt?: Date;
+}
+
+/** Where the backend proxy connects for a console session (never sent to browsers). */
+export interface ConsoleUpstream {
+  url: string;
+  headers: Record<string, string>;
+  caCertificate?: string;
+  rejectUnauthorized: boolean;
+}
+
 export interface MetricsSample {
   at: Date;
   cpu?: number;
@@ -193,6 +207,11 @@ export interface HypervisorAdapter {
   configureNetwork(ref: InstanceRef, ips: IpAssignment[], opts?: { bridge?: string; vlanTag?: number; nameservers?: string[] }): Promise<void>;
   resize(ref: InstanceRef, spec: { cpuCores?: number; memoryMb?: number; diskGb?: number }): Promise<void>;
   createSnapshot(ref: InstanceRef, name: string, description?: string): Promise<void>;
+  listSnapshots(ref: InstanceRef): Promise<SnapshotInfo[]>;
+  rollbackSnapshot(ref: InstanceRef, name: string): Promise<void>;
+  deleteSnapshot(ref: InstanceRef, name: string): Promise<void>;
   openConsole(ref: InstanceRef): Promise<ConsoleSession>;
+  /** WebSocket endpoint for a console session opened with openConsole (capability 'console.vnc'). */
+  consoleUpstream(ref: InstanceRef, session: ConsoleSession): ConsoleUpstream;
   getMetrics(ref: InstanceRef, timeframe: 'hour' | 'day' | 'week'): Promise<MetricsSample[]>;
 }

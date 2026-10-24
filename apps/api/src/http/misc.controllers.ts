@@ -160,12 +160,20 @@ export class PaymentsController {
     return this.c.sandboxGateway;
   }
 
+  /** A sandbox checkout pays either a wallet top-up (deposit) or an invoice (payment). */
+  private async checkout(orderId: string) {
+    const d = await this.c.deposits.findByGatewayOrder('sandbox', orderId);
+    if (d) return { label: 'Wallet top-up', amountMinor: d.amountMinor, currency: d.currency, status: d.status, open: d.status === 'AWAITING_PAYMENT' };
+    const p = await this.c.billing.findPaymentByGatewayOrder('sandbox', orderId);
+    if (p) return { label: 'Invoice payment', amountMinor: p.amountMinor, currency: p.currency, status: p.status, open: p.status === 'PENDING' };
+    throw new DomainError('not_found', 'Unknown checkout', 404);
+  }
+
   @Get('sandbox/checkout/:orderId')
   @Public()
   async checkoutPage(@Param('orderId') orderId: string, @Res() res: Response) {
     this.sandbox();
-    const d = await this.c.deposits.findByGatewayOrder('sandbox', orderId);
-    if (!d) throw new DomainError('not_found', 'Unknown checkout', 404);
+    const d = await this.checkout(orderId);
     const amount = (Number(d.amountMinor) / 100).toFixed(2);
     const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
     res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'");
@@ -173,9 +181,9 @@ export class PaymentsController {
 <title>Sandbox checkout</title><style>body{font:15px system-ui;max-width:420px;margin:60px auto;padding:0 16px;color:#111}
 .b{border:1px solid #ddd;border-radius:10px;padding:24px}button{font:inherit;padding:10px 16px;border-radius:8px;border:0;margin-right:8px;cursor:pointer}
 .ok{background:#0a7d4f;color:#fff}.no{background:#eee}.tag{background:#fff4d6;color:#7a5200;padding:2px 8px;border-radius:99px;font-size:12px}</style></head>
-<body><div class="b"><span class="tag">SANDBOX — no real money</span><h2>Wallet top-up</h2>
+<body><div class="b"><span class="tag">SANDBOX — no real money</span><h2>${esc(d.label)}</h2>
 <p>Amount: <b>${esc(d.currency)} ${esc(amount)}</b><br>Reference: <code>${esc(orderId)}</code><br>Status: ${esc(d.status)}</p>
-${d.status === 'AWAITING_PAYMENT' ? `<form method="post" action="/v1/payments/sandbox/checkout/${esc(orderId)}/complete">
+${d.open ? `<form method="post" action="/v1/payments/sandbox/checkout/${esc(orderId)}/complete">
 <button class="ok" name="outcome" value="captured">Simulate successful payment</button>
 <button class="no" name="outcome" value="failed">Simulate failure</button></form>` : '<p>This checkout is closed.</p>'}
 </div></body></html>`);
@@ -186,8 +194,7 @@ ${d.status === 'AWAITING_PAYMENT' ? `<form method="post" action="/v1/payments/sa
   @Public()
   async completeSandbox(@Param('orderId') orderId: string, @Body() body: Record<string, string>, @Res() res: Response) {
     const gw = this.sandbox();
-    const d = await this.c.deposits.findByGatewayOrder('sandbox', orderId);
-    if (!d) throw new DomainError('not_found', 'Unknown checkout', 404);
+    const d = await this.checkout(orderId);
     const raw = JSON.stringify({
       id: `evt_sbx_${orderId}_${body?.outcome === 'failed' ? 'f' : 'c'}`,
       type: body?.outcome === 'failed' ? 'payment.failed' : 'payment.captured',

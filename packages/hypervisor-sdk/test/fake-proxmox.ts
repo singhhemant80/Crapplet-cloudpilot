@@ -17,6 +17,7 @@ export interface FakeVm {
   template: 0 | 1;
   status: 'running' | 'stopped';
   config: Record<string, string>;
+  snapshots?: string[];
 }
 
 export class FakeProxmox {
@@ -146,7 +147,17 @@ export class FakeProxmox {
         this.vms.delete(vmid);
         return send(200, this.task(node));
       }
-      if (method === 'POST' && sub === '/snapshot') return send(200, this.task(node));
+      if (method === 'POST' && sub === '/snapshot') {
+        (vm.snapshots ??= []).push(body.get('snapname')!);
+        return send(200, this.task(node));
+      }
+      if (method === 'GET' && sub === '/snapshot')
+        return send(200, [...(vm.snapshots ?? []).map((n) => ({ name: n, snaptime: 1700000000 })), { name: 'current', running: 1 }]);
+      if ((m = /^\/snapshot\/([\w-]+)(\/rollback)?$/.exec(sub))) {
+        if (!(vm.snapshots ?? []).includes(m[1])) return send(500, `snapshot '${m[1]}' does not exist`);
+        if (method === 'DELETE') vm.snapshots = vm.snapshots!.filter((x) => x !== m![1]);
+        return send(200, this.task(node));
+      }
       if (method === 'POST' && sub === '/vncproxy') return send(200, { ticket: 'PVEVNC:abc', port: '5901' });
       if (method === 'GET' && sub === '/rrddata') return send(200, [{ time: 1700000000, cpu: 0.2, mem: 1e9 }]);
     }

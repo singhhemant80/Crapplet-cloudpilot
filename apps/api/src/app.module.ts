@@ -4,6 +4,7 @@ import type { Container } from './container';
 import { AccessGuard, CONTAINER, ErrorFilter } from './http/common';
 import { AdminController } from './http/admin.controller';
 import { ResellerController } from './http/reseller.controller';
+import { AccountController, AdminBillingController, CustomerPortalController, ResellerExtrasController } from './http/portal.controllers';
 import { AuthController, CustomerController, HealthController, PaymentsController } from './http/misc.controllers';
 
 @Module({})
@@ -12,7 +13,18 @@ export class AppModule {
   static forContainer(container: Container): DynamicModule {
     return {
       module: AppModule,
-      controllers: [HealthController, AuthController, AdminController, ResellerController, CustomerController, PaymentsController],
+      controllers: [
+        HealthController,
+        AuthController,
+        AccountController,
+        AdminController,
+        AdminBillingController,
+        ResellerController,
+        ResellerExtrasController,
+        CustomerController,
+        CustomerPortalController,
+        PaymentsController,
+      ],
       providers: [
         { provide: CONTAINER, useValue: container },
         { provide: APP_GUARD, useClass: AccessGuard },

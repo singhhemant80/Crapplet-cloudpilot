@@ -1,6 +1,6 @@
 import { ProviderError, type HypervisorAdapter, type InstanceRef, type IpAssignment } from '@cloudpilot/hypervisor-sdk';
 import { and, eq } from 'drizzle-orm';
-import type { Database } from '../../db/client';
+import type { Database, Tx } from '../../db/client';
 import { orderEvents, orders, osTemplates, productPlacements, services } from '../../db/schema';
 import { decryptSecret } from '../../common/crypto';
 import { audit } from '../../common/audit';
@@ -42,7 +42,18 @@ export class RetryLaterError extends Error {}
  * the partially built VM is deleted and funds/IPs are released — or, if cleanup
  * cannot be confirmed, the order is parked in NEEDS_ATTENTION with everything still held.
  */
+/** Customer-facing notifications for store orders (EmailService-backed; optional). */
+export interface ProvisioningNotifier {
+  serviceActive(tx: Tx, p: { tenantId: string; customerId: string; serviceId: string; hostname: string; ips: string[]; username: string }): Promise<void>;
+  orderFailed(tx: Tx, p: { tenantId: string; orderId: string; orderNumber: number; customerId: string | null; reason: string }): Promise<void>;
+}
+
 export class ProvisioningService {
+  private notifier?: ProvisioningNotifier;
+  setNotifier(n: ProvisioningNotifier) {
+    this.notifier = n;
+  }
+
   constructor(
     private readonly db: Database,
     private readonly hypervisors: HypervisorService,
@@ -127,7 +138,8 @@ export class ProvisioningService {
       // ── ACTIVE: capture funds, allocate IPs, activate service — atomically.
       const deliveryIds = await this.db.transaction(async (tx) => {
         await this.ipam.allocateForOrder(tx, orderId, service.id);
-        if (order.wholesaleMinor + order.setupFeeMinor > 0n) await this.ledger.capture(tx, orderId, SYSTEM);
+        // Reseller orders settle against the wallet hold; store orders were paid by invoice.
+        if (order.resellerId && order.wholesaleMinor + order.setupFeeMinor > 0n) await this.ledger.capture(tx, orderId, SYSTEM);
         const now = new Date();
         await tx
           .update(services)
@@ -148,6 +160,9 @@ export class ProvisioningService {
           },
         });
         await audit(tx, { tenantId: order.tenantId, actor: SYSTEM, resellerId: order.resellerId, action: 'service.activate', targetType: 'service', targetId: service.id });
+        if (!order.resellerId && order.customerId && this.notifier) {
+          await this.notifier.serviceActive(tx, { tenantId: order.tenantId, customerId: order.customerId, serviceId: service.id, hostname: service.hostname, ips: ips.map((i) => i.address), username: service.username });
+        }
         return ev.deliveryIds;
       });
       await this.afterCommit(deliveryIds);
@@ -229,7 +244,10 @@ export class ProvisioningService {
 
     const deliveryIds = await this.db.transaction(async (tx) => {
       await this.ipam.releaseForOrder(tx, orderId, 'provisioning failed');
-      if (order.wholesaleMinor + order.setupFeeMinor > 0n) await this.ledger.release(tx, orderId, SYSTEM);
+      if (order.resellerId && order.wholesaleMinor + order.setupFeeMinor > 0n) await this.ledger.release(tx, orderId, SYSTEM);
+      if (!order.resellerId && this.notifier) {
+        await this.notifier.orderFailed(tx, { tenantId: order.tenantId, orderId, orderNumber: order.number, customerId: order.customerId, reason: message });
+      }
       await transitionOrder(tx, orderId, 'FAILED', `Provisioning failed${cleanupNote}; funds and IPs released: ${message}`, {
         failureReason: message,
         encryptedSecret: null,

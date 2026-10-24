@@ -1,5 +1,5 @@
 import { and, desc, eq, inArray } from 'drizzle-orm';
-import type { Database } from '../../db/client';
+import type { Database, Tx } from '../../db/client';
 import { products, serviceRenewals, services } from '../../db/schema';
 import { Conflict, DomainError, NotFound } from '../../common/errors';
 import { audit, type AuditActor } from '../../common/audit';
@@ -17,7 +17,20 @@ type ServiceRow = typeof services.$inferSelect;
  * worker (see JobQueue.runServiceOperation); this class holds the logic both
  * for the worker and for synchronous reads/renewals in the API.
  */
+export interface ServiceNotifier {
+  statusChanged(tx: Tx, p: { tenantId: string; customerId: string; hostname: string; event: 'service.suspended' | 'service.unsuspended'; reason?: string | null }): Promise<void>;
+}
+
 export class ServiceOpsService {
+  private notifier?: ServiceNotifier;
+  private extras?: { execute(op: ServiceOperation): Promise<unknown> };
+  setExtras(e: { execute(op: ServiceOperation): Promise<unknown> }) {
+    this.extras = e;
+  }
+  setNotifier(n: ServiceNotifier) {
+    this.notifier = n;
+  }
+
   constructor(
     private readonly db: Database,
     private readonly hypervisors: HypervisorService,
@@ -86,6 +99,11 @@ export class ServiceOpsService {
     if (!svc) throw NotFound('Service');
     const actor: AuditActor = { type: op.actor.type, id: op.actor.id };
 
+    if (['reinstall', 'upgrade', 'snapshot_create', 'snapshot_rollback', 'snapshot_delete'].includes(op.action)) {
+      if (!this.extras) throw new DomainError('unsupported_operation', 'Not available', 501);
+      return this.extras.execute(op);
+    }
+
     switch (op.action) {
       case 'start':
       case 'stop':
@@ -153,6 +171,9 @@ export class ServiceOpsService {
     const ids = await this.db.transaction(async (tx) => {
       await tx.update(services).set({ ...patch, status, updatedAt: new Date() }).where(eq(services.id, svc.id));
       await audit(tx, { tenantId: svc.tenantId, actor, resellerId: svc.resellerId, action: event, targetType: 'service', targetId: svc.id });
+      if (!svc.resellerId && svc.customerId && this.notifier) {
+        await this.notifier.statusChanged(tx, { tenantId: svc.tenantId, customerId: svc.customerId, hostname: svc.hostname, event, reason: patch.suspendedReason });
+      }
       return (await this.webhooks.emit(tx, { tenantId: svc.tenantId, resellerId: svc.resellerId, type: event, data: { serviceId: svc.id } }))
         .deliveryIds;
     });

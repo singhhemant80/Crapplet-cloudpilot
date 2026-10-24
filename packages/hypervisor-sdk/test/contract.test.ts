@@ -142,6 +142,37 @@ describe('proxmox adapter specifics', () => {
   });
 });
 
+describe('snapshots and console', () => {
+  for (const [name, make] of [
+    ['mock', () => new MockHypervisorAdapter(new MemoryStateStore(), 'snap')],
+    ['proxmox', () => proxmox()],
+  ] as const) {
+    it(`${name}: creates, lists, rolls back and deletes snapshots`, async () => {
+      const a = make();
+      const ref = await a.createInstance(spec(`cp-snap-${name}`, '9000'));
+      await a.createSnapshot(ref, 'before-upgrade');
+      expect((await a.listSnapshots(ref)).map((s) => s.name)).toEqual(['before-upgrade']);
+      await a.rollbackSnapshot(ref, 'before-upgrade');
+      await a.deleteSnapshot(ref, 'before-upgrade');
+      expect(await a.listSnapshots(ref)).toEqual([]);
+      await expect(a.rollbackSnapshot(ref, 'missing-one')).rejects.toBeInstanceOf(ProviderError);
+    });
+  }
+
+  it('proxmox: builds an authenticated wss console upstream; mock does not offer a console', async () => {
+    const a = proxmox();
+    const ref = await a.createInstance(spec('cp-console', '9000'));
+    const session = await a.openConsole(ref);
+    const up = a.consoleUpstream(ref, session);
+    expect(up.url).toMatch(new RegExp(`^wss://127.0.0.1:${fake.port}/api2/json/nodes/pve1/qemu/\\d+/vncwebsocket\\?port=5901&vncticket=PVEVNC`));
+    expect(up.headers.Authorization).toMatch(/^PVEAPIToken=/);
+    expect(up.rejectUnauthorized).toBe(true);
+    const m = new MockHypervisorAdapter(new MemoryStateStore(), 'c');
+    expect(m.capabilities().has('console.vnc')).toBe(false);
+    expect(() => m.consoleUpstream()).toThrow(UnsupportedOperationError);
+  });
+});
+
 describe('mock failure injection', () => {
   it('throws on injected create failure', async () => {
     const a = new MockHypervisorAdapter(new MemoryStateStore(), 'f', { failOn: ['create'] });

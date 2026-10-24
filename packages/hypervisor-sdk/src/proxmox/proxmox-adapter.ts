@@ -4,6 +4,8 @@ import type {
   Capability,
   ConnectionCheck,
   ConsoleSession,
+  ConsoleUpstream,
+  SnapshotInfo,
   CreateInstanceSpec,
   HypervisorAdapter,
   InstanceRef,
@@ -75,6 +77,7 @@ export class ProxmoxAdapter implements HypervisorAdapter {
   private readonly dispatcher: Dispatcher;
   private readonly timeoutMs: number;
   private readonly opts: Required<ProxmoxOptions>;
+  private readonly tls: { ca?: string; rejectUnauthorized: boolean };
 
   constructor(config: ProviderConnectionConfig, private readonly log: (msg: string) => void = () => {}) {
     const { tokenId, tokenSecret } = config.credentials;
@@ -87,6 +90,7 @@ export class ProxmoxAdapter implements HypervisorAdapter {
     this.base = `${url.origin}/api2/json`;
     this.authHeader = `PVEAPIToken=${tokenId}=${tokenSecret}`;
     if (config.allowInsecureTls) this.log('WARNING: TLS verification disabled for Proxmox endpoint (development only)');
+    this.tls = { ca: config.caCertificate || undefined, rejectUnauthorized: !config.allowInsecureTls };
     this.dispatcher = new Agent({
       connect: {
         ca: config.caCertificate || undefined,
@@ -432,6 +436,41 @@ export class ProxmoxAdapter implements HypervisorAdapter {
   async createSnapshot(ref: InstanceRef, name: string, description?: string) {
     if (!/^[a-zA-Z][\w-]{1,39}$/.test(name)) throw new ProviderError('Invalid snapshot name', false);
     await this.runTask(ref.node, 'POST', this.qemu(ref, '/snapshot'), { snapname: name, description });
+  }
+
+  async listSnapshots(ref: InstanceRef): Promise<SnapshotInfo[]> {
+    const rows = await this.request<Array<Json>>('GET', this.qemu(ref, '/snapshot'));
+    return rows
+      .filter((r) => r.name !== 'current')
+      .map((r) => ({
+        name: String(r.name),
+        description: r.description ? String(r.description) : undefined,
+        createdAt: typeof r.snaptime === 'number' ? new Date(r.snaptime * 1000) : undefined,
+      }));
+  }
+
+  private snapName(name: string) {
+    if (!/^[a-zA-Z][\w-]{1,39}$/.test(name)) throw new ProviderError('Invalid snapshot name', false);
+    return encodeURIComponent(name);
+  }
+
+  async rollbackSnapshot(ref: InstanceRef, name: string) {
+    await this.runTask(ref.node, 'POST', this.qemu(ref, `/snapshot/${this.snapName(name)}/rollback`));
+  }
+
+  async deleteSnapshot(ref: InstanceRef, name: string) {
+    await this.runTask(ref.node, 'DELETE', this.qemu(ref, `/snapshot/${this.snapName(name)}`));
+  }
+
+  consoleUpstream(ref: InstanceRef, session: ConsoleSession): ConsoleUpstream {
+    const base = this.base.replace(/^https:/, 'wss:');
+    const qs = new URLSearchParams({ port: String(session.port), vncticket: session.ticket });
+    return {
+      url: `${base}${this.qemu(ref, '/vncwebsocket')}?${qs.toString()}`,
+      headers: { Authorization: this.authHeader },
+      caCertificate: this.tls.ca,
+      rejectUnauthorized: this.tls.rejectUnauthorized,
+    };
   }
 
   async openConsole(ref: InstanceRef): Promise<ConsoleSession> {
