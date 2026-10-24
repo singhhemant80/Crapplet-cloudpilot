@@ -52,6 +52,7 @@ install -d -o cloudpilot -g cloudpilot -m 0750 "$DEST" /var/log/cloudpilot /var/
 install -d -m 0750 -o root -g cloudpilot /etc/cloudpilot
 
 log "Database"
+cd /
 DB_PASS_FILE=/etc/cloudpilot/.dbpass
 [ -f "$DB_PASS_FILE" ] || (openssl rand -hex 24 > "$DB_PASS_FILE" && chmod 0600 "$DB_PASS_FILE")
 DB_PASS=$(cat "$DB_PASS_FILE")
@@ -103,7 +104,16 @@ if [ "$MEM_MB" -lt 4000 ] && [ "$(swapon --noheadings | wc -l)" -eq 0 ] && [ ! -
 fi
 rsync -a --delete --exclude node_modules --exclude .next --exclude dist --exclude .git --exclude '.env' --exclude '.env.*' "$SRC/" "$DEST/"
 chown -R cloudpilot:cloudpilot "$DEST"
-sudo -u cloudpilot bash -c "cd $DEST && npm ci --no-audit --no-fund && npm run build -w @cloudpilot/hypervisor-sdk && npm run build -w @cloudpilot/api && NEXT_TELEMETRY_DISABLED=1 npm run build -w @cloudpilot/web"
+# A previous interrupted run can leave a half-written node_modules that makes `npm ci` fail
+# with ENOTEMPTY; always start from a clean tree and retry once.
+clean_modules() { rm -rf "$DEST/node_modules" "$DEST"/apps/*/node_modules "$DEST"/packages/*/node_modules "$DEST"/apps/web/.next; }
+clean_modules
+if ! sudo -u cloudpilot bash -c "cd $DEST && npm ci --no-audit --no-fund"; then
+  echo "npm ci failed; cleaning and retrying once"
+  clean_modules; sudo -u cloudpilot rm -rf "$DEST/.npm/_cacache/tmp"
+  sudo -u cloudpilot bash -c "cd $DEST && npm ci --no-audit --no-fund"
+fi
+sudo -u cloudpilot bash -c "cd $DEST && npm run build -w @cloudpilot/hypervisor-sdk && npm run build -w @cloudpilot/api && NEXT_TELEMETRY_DISABLED=1 npm run build -w @cloudpilot/web"
 # Next.js standalone server needs its static assets next to it.
 sudo -u cloudpilot bash -c "cp -r $DEST/apps/web/.next/static $DEST/apps/web/.next/standalone/apps/web/.next/"
 
