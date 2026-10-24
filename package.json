@@ -1,0 +1,23 @@
+{
+  "name": "cloudpilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CloudPilot — hosting automation, billing, reseller and virtualization control plane",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "build": "npm run build -w @cloudpilot/hypervisor-sdk && npm run build -w @cloudpilot/api && npm run build -w @cloudpilot/web",
+    "test": "npm run test -w @cloudpilot/hypervisor-sdk && npm run test -w @cloudpilot/api",
+    "lint:types": "npm run typecheck --workspaces --if-present",
+    "db:migrate": "npm run db:migrate -w @cloudpilot/api",
+    "db:seed": "npm run db:seed -w @cloudpilot/api",
+    "dev:api": "npm run dev -w @cloudpilot/api",
+    "dev:worker": "npm run dev:worker -w @cloudpilot/api",
+    "dev:web": "npm run dev -w @cloudpilot/web"
+  }
+}

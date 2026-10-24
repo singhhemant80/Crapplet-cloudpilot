@@ -1,0 +1,30 @@
+[Unit]
+Description=CloudPilot web panel
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cloudpilot
+Group=cloudpilot
+WorkingDirectory=/opt/cloudpilot/apps/web/.next/standalone/apps/web
+EnvironmentFile=/etc/cloudpilot/cloudpilot.env
+Environment=PORT=3000 HOSTNAME=127.0.0.1
+ExecStart=/usr/bin/node /opt/cloudpilot/apps/web/.next/standalone/apps/web/server.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=60
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/cloudpilot
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

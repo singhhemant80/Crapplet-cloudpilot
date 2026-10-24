@@ -1,0 +1,68 @@
+# Optional container deployment. The primary target is a native Ubuntu install
+# (deploy/scripts/install-ubuntu.sh); this file is equivalent for container hosts.
+#
+#   cp .env.example .env    # fill in secrets
+#   docker compose up -d --build
+#   docker compose run --rm api node dist/db/seed.js
+#
+# Put a TLS-terminating proxy (deploy/nginx/cloudpilot.conf) in front of ports 3000/4000.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: cloudpilot
+      POSTGRES_USER: cloudpilot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudpilot"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes: [redisdata:/data]
+    restart: unless-stopped
+
+  migrate:
+    build: { context: ., dockerfile: deploy/docker/api.Dockerfile }
+    env_file: .env
+    environment: &dbenv
+      DATABASE_URL: postgresql://cloudpilot:${POSTGRES_PASSWORD}@postgres:5432/cloudpilot
+      REDIS_URL: redis://redis:6379/0
+    command: ["node", "dist/db/migrate.js"]
+    depends_on: { postgres: { condition: service_healthy } }
+
+  api:
+    build: { context: ., dockerfile: deploy/docker/api.Dockerfile }
+    env_file: .env
+    environment: *dbenv
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_started }
+    ports: ["127.0.0.1:4000:4000"]
+    restart: unless-stopped
+
+  worker:
+    build: { context: ., dockerfile: deploy/docker/api.Dockerfile }
+    env_file: .env
+    environment: *dbenv
+    command: ["node", "dist/worker.js"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_started }
+    restart: unless-stopped
+
+  web:
+    build: { context: ., dockerfile: deploy/docker/web.Dockerfile }
+    environment:
+      CLOUDPILOT_API_URL: http://api:4000
+    depends_on: [api]
+    ports: ["127.0.0.1:3000:3000"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

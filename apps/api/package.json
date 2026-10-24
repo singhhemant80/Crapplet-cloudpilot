@@ -1,0 +1,49 @@
+{
+  "name": "@cloudpilot/api",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/main.ts",
+    "dev:worker": "tsx watch src/worker.ts",
+    "start": "node dist/main.js",
+    "start:worker": "node dist/worker.js",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:seed": "tsx src/db/seed.ts",
+    "test": "vitest run --no-file-parallelism",
+    "openapi": "tsx src/scripts/export-openapi.ts",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@cloudpilot/hypervisor-sdk": "0.1.0",
+    "@nestjs/common": "11.1.6",
+    "@nestjs/core": "11.1.6",
+    "@nestjs/platform-express": "11.1.6",
+    "@nestjs/swagger": "11.2.0",
+    "@node-rs/argon2": "2.0.2",
+    "bullmq": "5.81.5",
+    "helmet": "8.1.0",
+    "ioredis": "5.11.1",
+    "jose": "5.10.0",
+    "pino": "9.7.0",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2",
+    "zod": "3.25.76",
+    "drizzle-orm": "0.45.4",
+    "pg": "8.16.3"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.3",
+    "@types/node": "22.15.30",
+    "@types/supertest": "6.0.3",
+    "supertest": "7.1.1",
+    "tsx": "4.20.3",
+    "typescript": "5.9.3",
+    "unplugin-swc": "1.5.5",
+    "@swc/core": "1.12.1",
+    "vitest": "3.2.7",
+    "drizzle-kit": "0.31.11",
+    "@types/pg": "8.15.4"
+  }
+}

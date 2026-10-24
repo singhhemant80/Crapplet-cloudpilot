@@ -1,0 +1,102 @@
+@import url('https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap');
+@import 'tailwindcss';
+
+/* CloudPilot tokens — cool server-room neutrals; colour is reserved for state. */
+:root {
+  --paper: #f5f7f9;
+  --surface: #ffffff;
+  --ink: #15212c;
+  --muted: #5b6b7a;
+  --line: #dde3e9;
+  --rack: #1f5fbf; /* primary action */
+  --rack-ink: #ffffff;
+  --ok: #1e7f4f;
+  --ok-bg: #e6f4ec;
+  --warn: #9a6512;
+  --warn-bg: #fbf1dc;
+  --bad: #b42318;
+  --bad-bg: #fbe9e7;
+  --idle: #5b6b7a;
+  --idle-bg: #eef1f4;
+  --focus: #1f5fbf;
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --paper: #0e151c;
+  --surface: #151f29;
+  --ink: #e4eaf0;
+  --muted: #93a3b3;
+  --line: #263442;
+  --rack: #5b93e6;
+  --rack-ink: #0e151c;
+  --ok: #4cc38a;
+  --ok-bg: #12301f;
+  --warn: #e0a84a;
+  --warn-bg: #33270f;
+  --bad: #f07a6e;
+  --bad-bg: #3a1714;
+  --idle: #93a3b3;
+  --idle-bg: #1d2935;
+  --focus: #8ab4f0;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-rack: var(--rack);
+  --color-rack-ink: var(--rack-ink);
+  --color-ok: var(--ok);
+  --color-ok-bg: var(--ok-bg);
+  --color-warn: var(--warn);
+  --color-warn-bg: var(--warn-bg);
+  --color-bad: var(--bad);
+  --color-bad-bg: var(--bad-bg);
+  --color-idle: var(--idle);
+  --color-idle-bg: var(--idle-bg);
+  --font-sans: 'Schibsted Grotesk', ui-sans-serif, system-ui, sans-serif;
+}
+
+html,
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+/* Money and counts line up in columns. */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* Provisioning rail: the one animated element — the live step pulses. */
+@keyframes cp-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--rack) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--rack) 0%, transparent);
+  }
+}
+.rail-live {
+  animation: cp-pulse 1.6s ease-in-out infinite;
+}
