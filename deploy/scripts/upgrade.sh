@@ -11,7 +11,7 @@ NEXT=/opt/cloudpilot.next
 ENV=/etc/cloudpilot/cloudpilot.env
 
 /usr/local/sbin/cloudpilot-backup
-rm -rf "$NEXT"; rsync -a --exclude node_modules --exclude .next --exclude dist --exclude .git "$SRC/" "$NEXT/"
+rm -rf "$NEXT"; rsync -a --exclude node_modules --exclude .next --exclude dist --exclude .git --exclude '.env' --exclude '.env.*' "$SRC/" "$NEXT/"
 chown -R cloudpilot:cloudpilot "$NEXT"
 sudo -u cloudpilot bash -c "cd $NEXT && npm ci --no-audit --no-fund && npm run build -w @cloudpilot/hypervisor-sdk && npm run build -w @cloudpilot/api && NEXT_TELEMETRY_DISABLED=1 npm run build -w @cloudpilot/web && cp -r apps/web/.next/static apps/web/.next/standalone/apps/web/.next/"
 sudo -u cloudpilot bash -c "cd $NEXT && npm test -w @cloudpilot/hypervisor-sdk" # quick offline sanity check

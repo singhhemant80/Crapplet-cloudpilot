@@ -43,13 +43,24 @@ curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/m
   | sudo bash -s -- --panel-domain panel.example.com --api-domain api.example.com --admin-email you@example.com
 ```
 
+**No domain yet?** Press Enter at the domain prompt, or run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/main/install.sh | sudo bash -s -- --ip 203.0.113.10 --admin-email you@example.com
+```
+
+The panel is then at `http://<server IP>`, the API at `http://<server IP>/v1` (docs at `/docs`),
+over plain HTTP — fine for checking everything, not for real customers. When DNS is ready, run
+the domain command above on the same server: data and secrets are kept, nginx and the URLs
+switch over, and SSL certificates are issued.
+
 Upgrade later (takes an encrypted backup first, rolls back the code on failure):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/main/install.sh | sudo bash -s -- --upgrade
 ```
 
-Other flags: `--no-tls` (private test network, plain HTTP), `--branch <tag>`, `--dry-run`.
+Other flags: `--ip [ADDR]`, `--no-tls` (domains without SSL), `--branch <tag>`, `--dry-run`.
 Then work through [docs/operations/production-checklist.md](docs/operations/production-checklist.md).
 
 ## Development

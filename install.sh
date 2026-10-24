@@ -8,7 +8,12 @@
 #   curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/main/install.sh \
 #     | sudo bash -s -- --panel-domain panel.example.com --api-domain api.example.com --admin-email you@example.com
 #
+# No domain yet? Use the server's IP address (plain HTTP; switch to domains later by re-running):
+#
+#   curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/main/install.sh | sudo bash -s -- --ip --admin-email you@example.com
+#
 # Options:
+#   --ip [ADDR]        no domain: serve panel + API on http://<server IP> (auto-detected if ADDR omitted)
 #   --panel-domain D   domain for the web panel (DNS must point to this server)
 #   --api-domain D     domain for the API used by resellers/WHMCS
 #   --admin-email E    first administrator login; also used for Let's Encrypt
@@ -23,7 +28,7 @@ set -euo pipefail
 REPO="${CLOUDPILOT_REPO:-https://github.com/singhhemant80/Crapplet-cloudpilot.git}"
 SRC=/usr/local/src/cloudpilot
 BRANCH=main
-PANEL=""; API=""; ADMIN=""; NO_TLS=0; UPGRADE=0; DRY=0
+PANEL=""; API=""; ADMIN=""; NO_TLS=0; UPGRADE=0; DRY=0; IP_MODE=0; IP=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -31,6 +36,7 @@ while [ $# -gt 0 ]; do
     --api-domain) API="${2:-}"; shift 2;;
     --admin-email) ADMIN="${2:-}"; shift 2;;
     --no-tls) NO_TLS=1; shift;;
+    --ip) IP_MODE=1; if [[ "${2:-}" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then IP="$2"; shift 2; else shift; fi;;
     --branch) BRANCH="${2:-}"; shift 2;;
     --upgrade) UPGRADE=1; shift;;
     --dry-run) DRY=1; shift;;
@@ -57,6 +63,15 @@ ask() {
   printf -v "$var" '%s' "$value"
 }
 
+# Public IPv4 of this server: ask an external service, fall back to the first non-private local address.
+detect_ip() {
+  local ip
+  ip=$(curl -fsS4 --max-time 5 https://api.ipify.org 2>/dev/null || true)
+  [[ "$ip" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -Ev '^(10\.|127\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)' | grep -E '^[0-9.]+$' | head -1 || true)
+  [[ "$ip" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+  echo "$ip"
+}
+
 valid_domain() { [[ "$1" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; }
 
 # ── preflight
@@ -73,6 +88,21 @@ say "CloudPilot installer"
 if [ "$UPGRADE" = 1 ]; then
   [ -d /opt/cloudpilot ] || die "No existing install at /opt/cloudpilot; run without --upgrade first"
 else
+  # Interactive: an empty panel domain means "use this server's IP for now".
+  if [ "$IP_MODE" = 0 ] && [ -z "$PANEL" ] && ( exec < /dev/tty ) 2>/dev/null; then
+    printf 'Panel domain (e.g. panel.example.com) — press Enter to use this server'"'"'s IP address for now: ' > /dev/tty
+    read -r PANEL < /dev/tty || true
+    [ -n "$PANEL" ] || IP_MODE=1
+  fi
+fi
+
+if [ "$UPGRADE" = 0 ] && [ "$IP_MODE" = 1 ]; then
+  [ -n "$IP" ] || IP=$(detect_ip)
+  [[ "$IP" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die "Could not detect this server's IP address; pass it: --ip 203.0.113.10"
+  say "Using IP address mode: http://$IP (no domain, no SSL)"
+  ask ADMIN "Administrator email" admin-email
+  [[ "$ADMIN" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || die "Invalid email: $ADMIN"
+elif [ "$UPGRADE" = 0 ]; then
   ask PANEL "Panel domain (e.g. panel.example.com)" panel-domain
   ask API "API domain (e.g. api.example.com)" api-domain
   ask ADMIN "Administrator email" admin-email
@@ -117,16 +147,27 @@ if [ "$UPGRADE" = 1 ]; then
   say "Upgrading (an encrypted database backup is taken first)"
   run bash "$SRC/deploy/scripts/upgrade.sh" "$SRC"
 else
-  ARGS=(--panel-domain "$PANEL" --api-domain "$API" --admin-email "$ADMIN")
-  [ "$NO_TLS" = 1 ] && ARGS+=(--no-tls)
+  if [ "$IP_MODE" = 1 ]; then
+    ARGS=(--ip "$IP" --admin-email "$ADMIN")
+  else
+    ARGS=(--panel-domain "$PANEL" --api-domain "$API" --admin-email "$ADMIN")
+    [ "$NO_TLS" = 1 ] && ARGS+=(--no-tls)
+  fi
   run bash "$SRC/deploy/scripts/install-ubuntu.sh" "${ARGS[@]}"
 fi
 
 say "Finished."
 if [ "$UPGRADE" = 0 ] && [ "$DRY" = 0 ]; then
-  P=$([ "$NO_TLS" = 1 ] && echo http || echo https)
-  echo "  Panel:  $P://$PANEL   (sign in as $ADMIN with the password printed above)"
-  echo "  API:    $P://$API     (resellers and WHMCS connect here)"
+  if [ "$IP_MODE" = 1 ]; then
+    echo "  Panel:  http://$IP        (sign in as $ADMIN with the password printed above)"
+    echo "  API:    http://$IP/v1     (API docs: http://$IP/docs)"
+    echo "  This is plain HTTP for testing. When DNS is ready, switch to domains + SSL with:"
+    echo "    curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/main/install.sh | sudo bash -s -- --panel-domain panel.example.com --api-domain api.example.com --admin-email $ADMIN"
+  else
+    P=$([ "$NO_TLS" = 1 ] && echo http || echo https)
+    echo "  Panel:  $P://$PANEL   (sign in as $ADMIN with the password printed above)"
+    echo "  API:    $P://$API     (resellers and WHMCS connect here)"
+  fi
   echo "  Next:   docs/operations/production-checklist.md in $SRC"
   echo "  Update later with:  curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/main/install.sh | sudo bash -s -- --upgrade"
 fi
