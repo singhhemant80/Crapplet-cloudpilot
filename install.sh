@@ -42,6 +42,8 @@ done
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 die() { printf '\033[31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 run() { if [ "$DRY" = 1 ]; then echo "[dry-run] $*"; else "$@"; fi; }
+# Never exit silently: report the failing line if anything unexpected fails.
+trap 'printf "\033[31mError:\033[0m installer stopped unexpectedly at line %s (exit %s). Re-run it; it is safe to repeat.\n" "$LINENO" "$?" >&2' ERR
 
 # Prompt on the terminal even when this script arrives through a pipe (curl | bash).
 ask() {
@@ -83,8 +85,13 @@ else
     # Let's Encrypt needs both names to resolve to this server; catch it now, not halfway through.
     MYIP=$(curl -fsS4 --max-time 5 https://api.ipify.org 2>/dev/null || true)
     for d in "$PANEL" "$API"; do
-      RES=$(getent ahostsv4 "$d" | awk 'NR==1 {print $1}')
-      [ -n "$RES" ] || die "$d does not resolve yet. Create its DNS A record first (or use --no-tls)."
+      RES=$(getent ahostsv4 "$d" 2>/dev/null | awk 'NR==1 {print $1}' || true)
+      if [ -z "$RES" ]; then
+        die "$d does not resolve yet.
+       Create a DNS A record:  $d  ->  ${MYIP:-YOUR_SERVER_IP}
+       for both $PANEL and $API, wait a few minutes, then run this command again.
+       (Testing without domains/SSL: add --no-tls.)"
+      fi
       if [ -n "$MYIP" ] && [ "$RES" != "$MYIP" ]; then
         say "Warning: $d resolves to $RES but this server's public IP is $MYIP — certificate issuance may fail."
       fi
