@@ -31,7 +31,7 @@ On a fresh **Ubuntu 22.04 or 24.04** server (2 GB+ RAM) with DNS A records for t
 (e.g. `panel.example.com` and `api.example.com`) pointing at it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/singhhemant80/crapplet-cloudpilot/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/main/install.sh | sudo bash
 ```
 
 It asks for the panel domain, API domain and admin email, then installs Node.js, PostgreSQL,
@@ -39,14 +39,14 @@ Redis and nginx, builds CloudPilot, migrates the database, gets Let's Encrypt ce
 the services and prints the first admin password. Non-interactive:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/singhhemant80/crapplet-cloudpilot/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/main/install.sh \
   | sudo bash -s -- --panel-domain panel.example.com --api-domain api.example.com --admin-email you@example.com
 ```
 
 Upgrade later (takes an encrypted backup first, rolls back the code on failure):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/singhhemant80/crapplet-cloudpilot/main/install.sh | sudo bash -s -- --upgrade
+curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/main/install.sh | sudo bash -s -- --upgrade
 ```
 
 Other flags: `--no-tls` (private test network, plain HTTP), `--branch <tag>`, `--dry-run`.

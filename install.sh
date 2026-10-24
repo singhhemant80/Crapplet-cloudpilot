@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # CloudPilot one-command installer for a fresh Ubuntu 22.04 / 24.04 server.
 #
-#   curl -fsSL https://raw.githubusercontent.com/singhhemant80/crapplet-cloudpilot/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/main/install.sh | sudo bash
 #
 # Asks for the panel domain, API domain and admin email (or pass them as flags):
 #
-#   curl -fsSL https://raw.githubusercontent.com/singhhemant80/crapplet-cloudpilot/main/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/main/install.sh \
 #     | sudo bash -s -- --panel-domain panel.example.com --api-domain api.example.com --admin-email you@example.com
 #
 # Options:
@@ -20,7 +20,7 @@
 # Safe to re-run: it updates the code and re-applies the installer idempotently.
 set -euo pipefail
 
-REPO="${CLOUDPILOT_REPO:-https://github.com/singhhemant80/crapplet-cloudpilot.git}"
+REPO="${CLOUDPILOT_REPO:-https://github.com/singhhemant80/Crapplet-cloudpilot.git}"
 SRC=/usr/local/src/cloudpilot
 BRANCH=main
 PANEL=""; API=""; ADMIN=""; NO_TLS=0; UPGRADE=0; DRY=0
@@ -34,7 +34,7 @@ while [ $# -gt 0 ]; do
     --branch) BRANCH="${2:-}"; shift 2;;
     --upgrade) UPGRADE=1; shift;;
     --dry-run) DRY=1; shift;;
-    -h|--help) sed -n '2,22p' "$0" 2>/dev/null || echo "see https://github.com/singhhemant80/crapplet-cloudpilot#install"; exit 0;;
+    -h|--help) sed -n '2,22p' "$0" 2>/dev/null || echo "see https://github.com/singhhemant80/Crapplet-cloudpilot#install"; exit 0;;
     *) echo "Unknown option: $1 (use --help)" >&2; exit 2;;
   esac
 done
@@ -121,5 +121,5 @@ if [ "$UPGRADE" = 0 ] && [ "$DRY" = 0 ]; then
   echo "  Panel:  $P://$PANEL   (sign in as $ADMIN with the password printed above)"
   echo "  API:    $P://$API     (resellers and WHMCS connect here)"
   echo "  Next:   docs/operations/production-checklist.md in $SRC"
-  echo "  Update later with:  curl -fsSL https://raw.githubusercontent.com/singhhemant80/crapplet-cloudpilot/main/install.sh | sudo bash -s -- --upgrade"
+  echo "  Update later with:  curl -fsSL https://raw.githubusercontent.com/singhhemant80/Crapplet-cloudpilot/main/install.sh | sudo bash -s -- --upgrade"
 fi
